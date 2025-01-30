@@ -1,4 +1,5 @@
 import json
+from django.forms import ValidationError
 from django.http import JsonResponse
 from .models import Category,Note
 from django.views.decorators.csrf import csrf_exempt
@@ -134,6 +135,25 @@ def createnote(request):
             existing_note = Note.objects.filter(title=title, content=content).first()
             if existing_note:
                 return JsonResponse({"error": "Note with this title already exist."}, status=400)
+            
+            max_length = 10
+            if len(title) > max_length:
+                return JsonResponse({"error": f"Title must not exceed {max_length} characters."}, status=400)
+
+            try:
+                MaxLengthValidator(max_length)(title)
+            except ValidationError as e:
+                return JsonResponse({"error": e.message}, status=400)
+            
+            
+            max_length = 50
+            if len(content) > max_length:
+                return JsonResponse({"error": f"Content must not exceed {max_length} characters."}, status=400)
+            try:
+                MaxLengthValidator(max_length)(content)
+            except ValidationError as e:
+                return JsonResponse({"error": e.message}, status=400)
+            
 
             if category_name:
                 category, created = Category.objects.get_or_create(categoryName=category_name)
@@ -316,28 +336,62 @@ def updateNote(request, note_id):
 def createCategory(request):
     if request.method == 'POST':
         try:
+            
+            auth_header = request.headers.get('Authorization', None)
+            if not auth_header:
+                return JsonResponse({"error": "Authorization header missing."}, status=401)
+            
+            token = auth_header.split(" ")[1] if " " in auth_header else None
+            if not token:
+                return JsonResponse({"error": "Bearer token missing."}, status=401)
+            
+            try:
+                JWTAuthentication().authenticate(request)  
+            except AuthenticationFailed:
+                return JsonResponse({"error": "Invalid or expired token."}, status=401)
+            
             body = json.loads(request.body.decode('utf-8'))
             categoryName = body.get('categoryName')
+
             if not categoryName:
-                return JsonResponse({'message': "Missing required feild"}, status=400)
+                return JsonResponse({'message': "Missing required field"}, status=400)
             
-            new_category =  Category.objects.create(categoryName = categoryName)
-            
+            max_length = 10
+            if len(categoryName) > max_length:
+                return JsonResponse({"error": f"categoryName must not exceed {max_length} characters."}, status=400)
+
+            try:
+                MaxLengthValidator(max_length)(categoryName)
+            except ValidationError as e:
+                return JsonResponse({"error": e.message}, status=400)
+
+            new_category = Category.objects.create(categoryName=categoryName)
             new_category.save()
-            
-            
+
+            my_user = request.user  
+
+            if my_user.is_authenticated:  
+                refresh = RefreshToken.for_user(my_user)
+                access_token = refresh.access_token
+            else:
+                return JsonResponse({"error": "User is not authenticated"}, status=401)
+
             return JsonResponse({
                 "category": {
                     'id': new_category.id,
                     'categoryName': new_category.categoryName
+                },
+                "tokens": {
+                    'access_token': str(access_token),
+                    'refresh_token': str(refresh)
                 }
-            }, status= 201)
-            
+            }, status=201)
+
         except json.JSONDecodeError:
-            return JsonResponse({"error": "invalid json format data"}, status= 400)
-                
+            return JsonResponse({"error": "Invalid JSON format"}, status=400)
+
         except Exception as e:
-            return JsonResponse({"error": str(e)}, status= 500)
+            return JsonResponse({"error": str(e)}, status=500)
 
     return JsonResponse({"error": "Method Not Allowed"}, status=405)
 
@@ -347,17 +401,16 @@ def listCategories(request):
     if request.method == 'GET':
         try:
             category_name = request.GET.get('category')
-            page = request.GET.get('page', 1)  
-            per_page = request.GET.get('per_page', 10) 
-
+            page = int(request.GET.get('page', 1)) 
+            limit = int(request.GET.get('limit', 10))  
             if category_name:
                 categories = Category.objects.filter(categoryName__icontains=category_name)
             else:
                 categories = Category.objects.all()
 
-            paginator = Paginator(categories, per_page)
+            paginator = Paginator(categories, limit)
             page_obj = paginator.get_page(page)
-
+            
             category_data = [
                 {
                     "id": cat.id,
@@ -377,4 +430,3 @@ def listCategories(request):
             return JsonResponse({"error": str(e)}, status=500)
 
     return JsonResponse({"error": "Method Not Allowed"}, status=405)
-
