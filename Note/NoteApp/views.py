@@ -18,42 +18,6 @@ from rest_framework_simplejwt.authentication import JWTAuthentication
 from rest_framework.exceptions import AuthenticationFailed
 from rest_framework.authentication import BaseAuthentication
 
-# class RegisterView(APIView):
-#     def post(self, request):
-#         username = request.data.get('username')
-#         password = request.data.get('password')
-        
-#         if not username or not password:
-#             return Response(
-#                 {"error": "Username and password are required."},
-#                 status=status.HTTP_400_BAD_REQUEST
-#             )
-        
-#         if User.objects.filter(username=username).exists():
-#             return Response(
-#                 {"error": "Username already exists."},
-#                 status=status.HTTP_400_BAD_REQUEST
-#             )
-        
-#         user = User(username=username)
-#         user.set_password(password)
-#         user.save()
-
-#         refresh = RefreshToken.for_user(user)
-#         access_token = refresh.access_token
-
-#         return Response(
-#             {
-#                 "status": "success",
-#                 "user_id": user.id,
-#                 "username": user.username,
-#                 "refresh": str(refresh),
-#                 "access": str(access_token)
-#             },
-#             status=status.HTTP_201_CREATED
-#         )
-
-
 
 User = get_user_model()
 
@@ -383,8 +347,8 @@ def listCategories(request):
     if request.method == 'GET':
         try:
             category_name = request.GET.get('category')
-            page = request.GET.get('page', 1)  # Default to page 1 if not specified
-            per_page = request.GET.get('per_page', 10)  # Number of items per page (default to 10)
+            page = request.GET.get('page', 1)  
+            per_page = request.GET.get('per_page', 10) 
 
             if category_name:
                 categories = Category.objects.filter(categoryName__icontains=category_name)
@@ -414,14 +378,3 @@ def listCategories(request):
 
     return JsonResponse({"error": "Method Not Allowed"}, status=405)
 
-
-
-
-
-
-# def customer_list(request):
-#     customers = Category.objects.all() 
-#     paginator = Paginator(customers, 5)  
-
-#     page_number = request.GET.get('page')  
-#     page_obj = paginator.get_page(page_number)  
