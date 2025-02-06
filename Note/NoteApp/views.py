@@ -469,5 +469,62 @@ def listCategories(request):
     return JsonResponse({"error": "Method Not Allowed"}, status=405)
 
 
-def image_update(request):
-    pass
+def Filter(request):
+    if request.method == 'GET':
+        try:
+            uploaded_image = None
+            image_url = None
+
+            if 'multipart/form-data' in request.content_type:
+                if "image" in request.FILES:
+                    uploaded_image = request.FILES["image"]
+                    try:
+                        ext = uploaded_image.name.split(".")[-1].lower()
+                        allowed_extensions = ["jpg", "jpeg", "png", "gif", "bmp"]
+                        
+                        if ext not in allowed_extensions:
+                            raise ValidationError("Invalid image format. Allowed formats: jpg, jpeg, png, gif, bmp.")
+                        
+                        if not uploaded_image.content_type.startswith('image'):
+                            raise ValidationError("Uploaded file is not an image.")
+                        
+                        max_size = 5 * 1024 * 1024  # 5MB
+                        if uploaded_image.size > max_size:
+                            raise ValidationError("Image size exceeds the maximum allowed size of 5MB.")
+                        
+                        image = Image.open(uploaded_image)
+                        image.verify()
+                    
+                    except ValidationError as e:
+                        return JsonResponse({"error": str(e)}, status=400)            
+
+            category_name = request.GET.get('category', None)
+
+            if category_name:
+                notes = Note.objects.filter(category__categoryName=category_name)
+            else:
+                notes = Note.objects.all()
+
+            response_data = []
+            for note in notes:
+                image_url = None
+                if note.file:
+                    image_url = note.get_photo_url()  
+
+                response_data.append({
+                    'note_id': str(note.note_id),
+                    'title': note.title,
+                    'category': note.category.categoryName if note.category else None,
+                    'content': note.content,
+                    'created_at': note.created_at,
+                    'updated_at': note.updated_at,
+                    'image_url': image_url
+                })
+
+            return JsonResponse(response_data, safe=False, status=200)
+
+        except Exception as e:
+            return JsonResponse({"error": str(e)}, status=500)
+
+    return JsonResponse({"error": "Method Not Allowed"}, status=405)
+

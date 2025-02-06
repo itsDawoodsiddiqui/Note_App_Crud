@@ -26,7 +26,7 @@ urlpatterns = [
     # path('delete/<int:id>/', views.delete_image_by_id, name='delete_file_by_id'),
 
 
-  
+  path('filter/', views.Filter, name='filter')
         
 ]
 
