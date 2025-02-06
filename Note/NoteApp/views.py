@@ -1,3 +1,6 @@
+import os
+from django.core.files.storage import default_storage
+from PIL import Image
 import json
 from django.forms import ValidationError
 from django.http import JsonResponse
@@ -18,6 +21,9 @@ from django.contrib.auth import get_user_model
 from rest_framework_simplejwt.authentication import JWTAuthentication
 from rest_framework.exceptions import AuthenticationFailed
 from rest_framework.authentication import BaseAuthentication
+# from .models import UploadedFile
+from urllib.parse import unquote
+from django.core.files.storage import FileSystemStorage
 
 
 User = get_user_model()
@@ -46,8 +52,6 @@ def signup(request):
             my_user.save()  
 
             user_uuid = uuid.uuid4()
-            refresh = RefreshToken.for_user(my_user)
-            access_token = refresh.access_token
 
             return JsonResponse({
                 "user": {
@@ -55,8 +59,6 @@ def signup(request):
                     "email": email,
                     "uuid": str(user_uuid), 
                 },
-                "refresh": str(refresh),
-                "access": str(access_token)
             }, status=201)
 
         except json.JSONDecodeError:
@@ -101,83 +103,93 @@ def login(request):
 
         except Exception as e:
             return JsonResponse({"error": str(e)}, status=500)
-
-
 @csrf_exempt
-@permission_classes([IsAuthenticated])
+@permission_classes(IsAuthenticated)
 def createnote(request):
     if request.method == 'POST':
         try:
-            auth_header = request.headers.get('Authorization', None)
-            if not auth_header:
-                return JsonResponse({"error": "Authorization header missing."}, status=401)
-            
-            token = auth_header.split(" ")[1] if " " in auth_header else None
-            if not token:
-                return JsonResponse({"error": "Bearer token missing."}, status=401)
-            
-            try:
-                JWTAuthentication().authenticate(request)  
-            except AuthenticationFailed:
-                return JsonResponse({"error": "Invalid or expired token."}, status=401)
-            
-            body = json.loads(request.body.decode('utf-8'))
-            title = body.get('title')
-            content = body.get('content')
-            category_name = body.get('category')
-            
-            if not title:
-                return JsonResponse({"error": "Title is required."}, status=400)
+            uploaded_image = None
+            image_url = None
 
-            if not content:
-                return JsonResponse({"error": "Content is required."}, status=400)
+            if 'multipart/form-data' in request.content_type:
+                if "image" in request.FILES:
+                    uploaded_image = request.FILES["image"]
+                    try:
+                        ext = uploaded_image.name.split(".")[-1].lower()
+                        allowed_extensions = ["jpg", "jpeg", "png", "gif", "bmp"]
+                        
+                        if ext not in allowed_extensions:
+                            raise ValidationError("Invalid image format. Allowed formats: jpg, jpeg, png, gif, bmp.")
+                        if not uploaded_image.content_type.startswith('image'):
+                            raise ValidationError("Uploaded file is not an image.")
+                        
+                        max_size = 5 * 1024 * 1024  # 5MB
+                        if uploaded_image.size > max_size:
+                            raise ValidationError("Image size exceeds the maximum allowed size of 5MB.")
+                        
+                        image = Image.open(uploaded_image)
+                        image.verify()
+                    
+                    except ValidationError as e:
+                        return JsonResponse({"error": str(e)}, status=400)
 
-            existing_note = Note.objects.filter(title=title, content=content).first()
-            if existing_note:
-                return JsonResponse({"error": "Note with this title already exist."}, status=400)
-            
-            max_length = 10
-            if len(title) > max_length:
-                return JsonResponse({"error": f"Title must not exceed {max_length} characters."}, status=400)
+                    title = request.POST.get('title')
+                    content = request.POST.get('content')
+                    category_name = request.POST.get('category')
 
-            try:
-                MaxLengthValidator(max_length)(title)
-            except ValidationError as e:
-                return JsonResponse({"error": e.message}, status=400)
-            
-            
-            max_length = 50
-            if len(content) > max_length:
-                return JsonResponse({"error": f"Content must not exceed {max_length} characters."}, status=400)
-            try:
-                MaxLengthValidator(max_length)(content)
-            except ValidationError as e:
-                return JsonResponse({"error": e.message}, status=400)
-            
+                    if category_name:
+                        category, created = Category.objects.get_or_create(categoryName=category_name)
+                    else:
+                        category = None
+
+                    new_note = Note.objects.create(
+                        title=title,
+                        content=content,
+                        category=category,
+                        file=uploaded_image
+                    )
+
+                    image_url = new_note.get_photo_url()
+
+                    return JsonResponse({
+                        "message": "Note created and image uploaded successfully!",
+                        "file_name": uploaded_image.name,
+                        "image_url": image_url,
+                        "title": new_note.title,
+                        "content": new_note.content,
+                        "category": new_note.category.categoryName if new_note.category else None
+                    }, status=201)
+                else:
+                    return JsonResponse({"error": "No image uploaded"}, status=400)
+
+            title = request.POST.get('title')
+            content = request.POST.get('content')
+            category_name = request.POST.get('category')
 
             if category_name:
                 category, created = Category.objects.get_or_create(categoryName=category_name)
             else:
                 category = None
 
-            new_note = Note.objects.create(title=title, content=content, category=category)
+            new_note = Note.objects.create(
+                title=title,
+                content=content,
+                category=category,
+            )
 
             return JsonResponse({
-                "note": {
-                    "title": new_note.title,
-                    "content": new_note.content,
-                    "category": new_note.category.categoryName if new_note.category else None
-                },
+                "message": "Note created successfully!",
+                "file_name": None,
+                "image_url": None,
+                "title": new_note.title,
+                "content": new_note.content,
+                "category": new_note.category.categoryName if new_note.category else None
             }, status=201)
-
-        except json.JSONDecodeError:
-            return JsonResponse({"error": "Invalid JSON data."}, status=400)
 
         except Exception as e:
             return JsonResponse({"error": str(e)}, status=500)
 
     return JsonResponse({"error": "Invalid HTTP method."}, status=405)
-
 
 # List notes
 def listNotes(request, note_id=None):
@@ -213,6 +225,7 @@ def listNotes(request, note_id=None):
                 }
                 for note in page_obj
             ]
+            
 
             return JsonResponse({
                 "notes": note_data,
@@ -227,25 +240,30 @@ def listNotes(request, note_id=None):
     return JsonResponse({"error": "Method Not Allowed"}, status=405)
 
 
-# Specific note
 def specificNote(request, note_id=None):
     if request.method == 'GET':
         try:
-           note = Note.objects.get(note_id=note_id)
-           print(f"Get Specific Note ID: {note_id}")
-           return JsonResponse({
+            note = Note.objects.get(note_id=note_id)
+            print(f"Get Specific Note ID: {note_id}")
+            
+            image_url = note.get_photo_url() 
+
+            return JsonResponse({
                 'note_id': note.note_id,
                 'title': note.title,
                 'category': note.category.categoryName if note.category else None,
                 'content': note.content,
                 'created_at': note.created_at,
-                'updated_at': note.updated_at
+                'updated_at': note.updated_at,
+                'image_url': image_url 
             }, status=200)
 
         except Exception as e:
             return JsonResponse({"error": str(e)}, status=500)
 
     return JsonResponse({"error": "Method Not Allowed"}, status=405)
+
+
 
 
 # Delete Todo Function Code
@@ -282,54 +300,73 @@ def deleteNote(request, note_id):
             return JsonResponse({"error": str(e)}, status=500)
 
 
+
+
 @csrf_exempt
 def updateNote(request, note_id):
-    if request.method == 'PUT':
-        try:       
-            auth_header = request.headers.get('Authorization', None)
-            if not auth_header:
-                return JsonResponse({"error": "Authorization header missing."}, status=401)
-            
-            token = auth_header.split(" ")[1] if " " in auth_header else None
-            if not token:
-                return JsonResponse({"error": "Bearer token missing."}, status=401)
-            
-            try:
-                JWTAuthentication().authenticate(request)  
-            except AuthenticationFailed:
-                return JsonResponse({"error": "Invalid or expired token."}, status=401)
-            note = Note.objects.get(note_id=note_id)
-            
-        except Note.DoesNotExist:
-            return JsonResponse({'error': 'Note Not Found'}, status=404)
-        except Exception as e:
-            return JsonResponse({'error': str(e)}, status=500)
-        
+    if request.method != 'PUT':
+        return JsonResponse({"error": "Invalid HTTP method."}, status=405)
+
+    try:
+        # Authorization Check
+        auth_header = request.headers.get('Authorization', None)
+        if not auth_header or " " not in auth_header:
+            return JsonResponse({"error": "Authorization header missing or invalid."}, status=401)
+
+        token = auth_header.split(" ")[1]
         try:
-            data = json.loads(request.body)
-            title = data.get('title')
-            category = data.get('category')
-            content = data.get('content')
+            JWTAuthentication().authenticate(request)
+        except AuthenticationFailed:
+            return JsonResponse({"error": "Invalid or expired token."}, status=401)
 
-            if not title:
-                return JsonResponse({'error': 'Title is required'}, status=400)
+        note = Note.objects.get(note_id=note_id)
+    except Note.DoesNotExist:
+        return JsonResponse({'error': 'Note Not Found'}, status=404)
+    except Exception as e:
+        return JsonResponse({'error': str(e)}, status=500)
 
-            note.title = title
-            note.content = content
-            note.save()
+    try:
+        title = request.POST.get('title')
+        category = request.POST.get('category')
+        content = request.POST.get('content')
+        image_file = request.FILES.get('image')  # Image handling
 
-            response_data = {
-                'note_id': note_id,
-                'title': title,
-                'date': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
-                'category': category,
-                'content': content
-            }
+        print("Title:", title)
+        print("Category:", category)
+        print("Content:", content)
+        print("Image File:", image_file)
 
-            return JsonResponse(response_data, status=200)
-        
-        except Exception as e:
-            return JsonResponse({'error': str(e)}, status=500)
+        if not title:
+            return JsonResponse({'error': 'Title is required'}, status=400)
+
+        # Update the note fields
+        note.title = title
+        note.category = category
+        note.content = content
+
+        if image_file:
+            fs = FileSystemStorage()
+            filename = fs.save(image_file.name, image_file)  # Save image
+            note.image_url = fs.url(filename)  # Store image URL
+
+        note.save()
+
+        # Prepare response
+        response_data = {
+            'note_id': note_id,
+            'title': title,
+            'date': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+            'category': category,
+            'content': content,
+            'image_url': note.image_url
+        }
+        return JsonResponse(response_data, status=200)
+
+    except Exception as e:
+        return JsonResponse({'error': str(e)}, status=500)
+
+
+
 
 
 @csrf_exempt
@@ -430,3 +467,7 @@ def listCategories(request):
             return JsonResponse({"error": str(e)}, status=500)
 
     return JsonResponse({"error": "Method Not Allowed"}, status=405)
+
+
+def image_update(request):
+    pass
