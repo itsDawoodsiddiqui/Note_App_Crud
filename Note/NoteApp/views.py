@@ -21,15 +21,24 @@ from django.contrib.auth import get_user_model
 from rest_framework_simplejwt.authentication import JWTAuthentication
 from rest_framework.exceptions import AuthenticationFailed
 from rest_framework.authentication import BaseAuthentication
-# from .models import UploadedFile
+from django.http import JsonResponse
+from django.views import View
 from urllib.parse import unquote
 from django.core.files.storage import FileSystemStorage
+from .utils.logger import log_request
+import logging
+from .models import Signup  
+import logging
+from django.utils.decorators import sync_and_async_middleware
+from asgiref.sync import sync_to_async
 
-
-User = get_user_model()
+logger = logging.getLogger(__name__)
 
 @csrf_exempt
-def signup(request):
+async def signup(request):
+    client_ip = get_client_ip(request)
+    logger.info(f"Create note endpoint hit from IP: {client_ip}")
+
     if request.method == 'POST':
         try:
             body = json.loads(request.body.decode('utf-8'))
@@ -38,38 +47,45 @@ def signup(request):
             password = body.get('password')
 
             if not (username and email and password):
+                log_request(request, "Missing required fields: email, username & password")
                 return JsonResponse({"error": "Missing required fields."}, status=400)
 
-            if User.objects.filter(username=username).exists():
+            username_exists = await sync_to_async(Signup.objects.filter(username=username).exists)()
+            email_exists = await sync_to_async(Signup.objects.filter(email=email).exists)()
+
+            if username_exists:
+                log_request(request, "username already exists")
                 return JsonResponse({"error": "Username already exists."}, status=400)
 
-            if User.objects.filter(email=email).exists():
+            if email_exists:
+                log_request(request, "email already exists")
                 return JsonResponse({"error": "Email already exists."}, status=400)
 
-            my_user = User.objects.create_user(username=username, email=email, password=password)
-            my_user.is_staff = True 
-            my_user.is_superuser = True  
-            my_user.save()  
+            my_signup = await sync_to_async(Signup.objects.create)(username=username, email=email)
+            
+            user_id = my_signup.user_id  
 
-            user_uuid = uuid.uuid4()
+            log_request(request, "User signup successfully")
+            logger.info(f"Signup successfully from IP: {client_ip}")
 
             return JsonResponse({
                 "user": {
                     "username": username,
                     "email": email,
-                    "uuid": str(user_uuid), 
+                    "user_id": str(user_id),
                 },
             }, status=201)
 
         except json.JSONDecodeError:
+            log_request(request, "Invalid JSON data")
             return JsonResponse({"error": "Invalid JSON format."}, status=400)
 
         except Exception as e:
+            logger.error(f"Error occurred from IP: {client_ip}: {str(e)}")
             return JsonResponse({"error": str(e)}, status=500)
 
-
 @csrf_exempt
-def login(request):
+async def login(request):
     if request.method == 'POST':
         try:
             body = json.loads(request.body.decode('utf-8'))
@@ -77,17 +93,22 @@ def login(request):
             password = body.get('password')
 
             if not (email and password):
+                log_request(request, "Username and email missing")
                 return JsonResponse({"error": "Missing required fields."}, status=400)
 
-            user = User.objects.filter(email=email).first()
+            user = await sync_to_async(User.objects.filter(email=email).exists)()
+            
             if not user:
+                log_request(request, "User is not found")                
                 return JsonResponse({"error": "User not found."}, status=400)
 
             if not user.check_password(password):
+                log_request(request, "password is incorrect")
                 return JsonResponse({"error": "Incorrect password."}, status=400)
 
             refresh = RefreshToken.for_user(user)
             access_token = refresh.access_token
+            log_request(request, "User login successfully")
 
             return JsonResponse({
                 "user": {
@@ -97,19 +118,36 @@ def login(request):
                 "refresh": str(refresh),
                 "access": str(access_token)
             }, status=200)
-
+            
+            
         except json.JSONDecodeError:
+            log_request(request, "invalid json data")
             return JsonResponse({"error": "Invalid JSON format."}, status=400)
 
         except Exception as e:
             return JsonResponse({"error": str(e)}, status=500)
+
+def get_client_ip(request):
+    x_forwarded_for = request.META.get('HTTP_X_FORWARDED_FOR')
+    if x_forwarded_for:
+        ip = x_forwarded_for.split(',')[0]  
+    else:
+        ip = request.META.get('REMOTE_ADDR')
+    return ip
+
 @csrf_exempt
 @permission_classes(IsAuthenticated)
-def createnote(request):
+async def createnote(request):
+    client_ip = get_client_ip(request)
+
+    logger.info(f"Create note endpoint hit from IP: {client_ip}")
+
     if request.method == 'POST':
         try:
             uploaded_image = None
             image_url = None
+
+            logger.info(f"Processing the uploaded image from IP addresses: {client_ip}")
 
             if 'multipart/form-data' in request.content_type:
                 if "image" in request.FILES:
@@ -119,13 +157,17 @@ def createnote(request):
                         allowed_extensions = ["jpg", "jpeg", "png", "gif", "bmp"]
                         
                         if ext not in allowed_extensions:
-                            raise ValidationError("Invalid image format. Allowed formats: jpg, jpeg, png, gif, bmp.")
+                            logger.warning(f"Invalid image format uploaded from IP: {client_ip}")
+                            raise ValidationError("Invalid image format.")
+                        
                         if not uploaded_image.content_type.startswith('image'):
+                            logger.warning(f"Uploaded file is not an image from IP: {client_ip}")
                             raise ValidationError("Uploaded file is not an image.")
                         
                         max_size = 5 * 1024 * 1024  # 5MB
                         if uploaded_image.size > max_size:
-                            raise ValidationError("Image size exceeds the maximum allowed size of 5MB.")
+                            logger.warning(f"Image size exceeds 5MB from IP: {client_ip}")
+                            raise ValidationError("Image size exceeds 5MB.")
                         
                         image = Image.open(uploaded_image)
                         image.verify()
@@ -138,7 +180,7 @@ def createnote(request):
                     category_name = request.POST.get('category')
 
                     if category_name:
-                        category, created = Category.objects.get_or_create(categoryName=category_name)
+                        category = Category.objects.get_or_create(categoryName=category_name)
                     else:
                         category = None
 
@@ -150,9 +192,9 @@ def createnote(request):
                     )
 
                     image_url = new_note.get_photo_url()
-
+                    logger.info(f"Note created successfully with image upload from IP: {client_ip}")
                     return JsonResponse({
-                        "message": "Note created and image uploaded successfully!",
+                        "message": "Note created successfully!",
                         "file_name": uploaded_image.name,
                         "image_url": image_url,
                         "title": new_note.title,
@@ -160,6 +202,7 @@ def createnote(request):
                         "category": new_note.category.categoryName if new_note.category else None
                     }, status=201)
                 else:
+                    logger.warning(f"No image uploaded from IP: {client_ip}")
                     return JsonResponse({"error": "No image uploaded"}, status=400)
 
             title = request.POST.get('title')
@@ -167,7 +210,7 @@ def createnote(request):
             category_name = request.POST.get('category')
 
             if category_name:
-                category, created = Category.objects.get_or_create(categoryName=category_name)
+                category = await sync_to_async(Category.objects.get_or_create(categoryName=category_name))
             else:
                 category = None
 
@@ -176,7 +219,7 @@ def createnote(request):
                 content=content,
                 category=category,
             )
-
+            logger.info(f"Note created successfully without image from IP: {client_ip}")
             return JsonResponse({
                 "message": "Note created successfully!",
                 "file_name": None,
@@ -187,11 +230,11 @@ def createnote(request):
             }, status=201)
 
         except Exception as e:
+            logger.error(f"Error occurred from IP: {client_ip}: {str(e)}")
             return JsonResponse({"error": str(e)}, status=500)
 
     return JsonResponse({"error": "Invalid HTTP method."}, status=405)
 
-# List notes
 def listNotes(request, note_id=None):
     if request.method == 'GET':
         try:
@@ -213,7 +256,7 @@ def listNotes(request, note_id=None):
 
             paginator = Paginator(notes, limit)
             page_obj = paginator.get_page(page)
-            
+            log_request(request, "List of all notes")
             note_data = [
                 {
                     'note_id': note.note_id,
@@ -239,14 +282,13 @@ def listNotes(request, note_id=None):
 
     return JsonResponse({"error": "Method Not Allowed"}, status=405)
 
-
-def specificNote(request, note_id=None):
+async def specificNote(request, note_id=None):
     if request.method == 'GET':
         try:
-            note = Note.objects.get(note_id=note_id)
+            note = await sync_to_async(Note.objects.get(note_id=note_id))
             print(f"Get Specific Note ID: {note_id}")
             
-            image_url = note.get_photo_url() 
+            image_url = await sync_to_async(note.get_photo_url()) 
 
             return JsonResponse({
                 'note_id': note.note_id,
@@ -263,35 +305,36 @@ def specificNote(request, note_id=None):
 
     return JsonResponse({"error": "Method Not Allowed"}, status=405)
 
-
-
-
-# Delete Todo Function Code
 @csrf_exempt
-def deleteNote(request, note_id):
+@permission_classes(IsAuthenticated)
+async def deleteNote(request, note_id):
     if request.method == 'DELETE':
         try:       
-            auth_header = request.headers.get('Authorization', None)
+            auth_header = await sync_to_async(request.headers.get('Authorization', None))
             if not auth_header:
                 return JsonResponse({"error": "Authorization header missing."}, status=401)
             
-            token = auth_header.split(" ")[1] if " " in auth_header else None
+            token = await sync_to_async(auth_header.split(" "))[1] if " " in auth_header else None
             if not token:
+                log_request(request, "Bearer token missing")
                 return JsonResponse({"error": "Bearer token missing."}, status=401)
             
             try:
                 JWTAuthentication().authenticate(request)  
             except AuthenticationFailed:
+                log_request(request, "Expired Token")
                 return JsonResponse({"error": "Invalid or expired token."}, status=401)
             
             print(f"Attempting to delete note with note_id: {note_id}")
             
-            note = Note.objects.filter(note_id=note_id)
+            note = await sync_to_async (Note.objects.filter(note_id=note_id)) 
             
             if not note:
                 return JsonResponse({"error": "Note Not Found"}, status=404)
 
             note.delete()
+            
+            log_request(request, "Note deleted successfully")
 
             return JsonResponse({"success": f"Note with Note {note_id} deleted successfully."}, status=200)
 
@@ -299,28 +342,29 @@ def deleteNote(request, note_id):
             print(f"Error occurred while deleting note: {e}") 
             return JsonResponse({"error": str(e)}, status=500)
 
-
-
-
 @csrf_exempt
-def updateNote(request, note_id):
+@permission_classes(IsAuthenticated)
+async def updateNote(request, note_id):
     if request.method != 'PUT':
         return JsonResponse({"error": "Invalid HTTP method."}, status=405)
 
     try:
         # Authorization Check
-        auth_header = request.headers.get('Authorization', None)
+        auth_header = await sync_to_async(request.headers.get('Authorization', None))
         if not auth_header or " " not in auth_header:
+            log_request(request, "Authorixation header missing fill authorization header")
             return JsonResponse({"error": "Authorization header missing or invalid."}, status=401)
 
-        token = auth_header.split(" ")[1]
+        token = await sync_to_async(auth_header.split(" ")[1])
         try:
             JWTAuthentication().authenticate(request)
         except AuthenticationFailed:
+            log_request(request, "Expired Token")
             return JsonResponse({"error": "Invalid or expired token."}, status=401)
 
-        note = Note.objects.get(note_id=note_id)
+        note = await sync_to_async(Note.objects.get(note_id=note_id))
     except Note.DoesNotExist:
+        log_request(request, "Note not found")
         return JsonResponse({'error': 'Note Not Found'}, status=404)
     except Exception as e:
         return JsonResponse({'error': str(e)}, status=500)
@@ -337,6 +381,7 @@ def updateNote(request, note_id):
         print("Image File:", image_file)
 
         if not title:
+            log_request(request, "Please give title")
             return JsonResponse({'error': 'Title is required'}, status=400)
 
         # Update the note fields
@@ -350,7 +395,9 @@ def updateNote(request, note_id):
             note.image_url = fs.url(filename)  # Store image URL
 
         note.save()
-
+        
+        log_request(request, "Note updated successfully")
+        
         # Prepare response
         response_data = {
             'note_id': note_id,
@@ -365,20 +412,16 @@ def updateNote(request, note_id):
     except Exception as e:
         return JsonResponse({'error': str(e)}, status=500)
 
-
-
-
-
 @csrf_exempt
-def createCategory(request):
+async def createCategory(request):
     if request.method == 'POST':
         try:
-            
-            auth_header = request.headers.get('Authorization', None)
+    
+            auth_header = await sync_to_async(request.headers.get('Authorization', None))
             if not auth_header:
                 return JsonResponse({"error": "Authorization header missing."}, status=401)
             
-            token = auth_header.split(" ")[1] if " " in auth_header else None
+            token = await sync_to_async(auth_header.split(" ")[1]) if " " in auth_header else None
             if not token:
                 return JsonResponse({"error": "Bearer token missing."}, status=401)
             
@@ -388,7 +431,7 @@ def createCategory(request):
                 return JsonResponse({"error": "Invalid or expired token."}, status=401)
             
             body = json.loads(request.body.decode('utf-8'))
-            categoryName = body.get('categoryName')
+            categoryName = await sync_to_async(body.get('categoryName'))
 
             if not categoryName:
                 return JsonResponse({'message': "Missing required field"}, status=400)
@@ -402,7 +445,7 @@ def createCategory(request):
             except ValidationError as e:
                 return JsonResponse({"error": e.message}, status=400)
 
-            new_category = Category.objects.create(categoryName=categoryName)
+            new_category = await sync_to_async(Category.objects.create(categoryName=categoryName))
             new_category.save()
 
             my_user = request.user  
@@ -432,12 +475,10 @@ def createCategory(request):
 
     return JsonResponse({"error": "Method Not Allowed"}, status=405)
 
-
-
-def listCategories(request):
+async def listCategories(request):
     if request.method == 'GET':
         try:
-            category_name = request.GET.get('category')
+            category_name = await sync_to_async(request.GET.get('category'))
             page = int(request.GET.get('page', 1)) 
             limit = int(request.GET.get('limit', 10))  
             if category_name:
@@ -463,11 +504,10 @@ def listCategories(request):
                 "total_items": paginator.count,
             }, status=200)
 
-        except Exception as e:
+        except Exception as e:  
             return JsonResponse({"error": str(e)}, status=500)
 
     return JsonResponse({"error": "Method Not Allowed"}, status=405)
-
 
 def Filter(request):
     if request.method == 'GET':
@@ -507,9 +547,7 @@ def Filter(request):
 
             response_data = []
             for note in notes:
-                image_url = None
-                if note.file:
-                    image_url = note.get_photo_url()  
+                image_url = note.get_photo_url() if note.file else None  
 
                 response_data.append({
                     'note_id': str(note.note_id),
@@ -522,9 +560,8 @@ def Filter(request):
                 })
 
             return JsonResponse(response_data, safe=False, status=200)
-
+        
         except Exception as e:
             return JsonResponse({"error": str(e)}, status=500)
 
     return JsonResponse({"error": "Method Not Allowed"}, status=405)
-

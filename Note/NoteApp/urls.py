@@ -1,6 +1,7 @@
 from django.urls import path
 from . import views
-# from .views import RegisterView  # Import your RegisterView if needed
+# from .logger import log_request
+# from .views import MyView  # Import your RegisterView if needed
 from django.conf import settings
 from django.conf.urls.static import static
 # from .views import upload_image, get_uploaded_files, delete_image_by_id
@@ -26,7 +27,11 @@ urlpatterns = [
     # path('delete/<int:id>/', views.delete_image_by_id, name='delete_file_by_id'),
 
 
-  path('filter/', views.Filter, name='filter')
+  path('filter/', views.Filter, name='filter'),
+  # path('filter_category/', views.get_notes, name='get_notes'),
+  
+  # path('hello/', log_request(/), name='hello'),
+
         
 ]
 
